@@ -1,5 +1,3 @@
-"""TT utility functions for SGLang plugin."""
-
 import ast
 import logging
 import os
@@ -140,28 +138,25 @@ def get_mesh_grid(dp_rank=0):
     return mesh_grid
 
 
-def open_mesh_device(override_tt_config=None, trace_mode=False, dp_rank=0):
-    """
-    Open TT mesh device for SGLang plugin.
-    This replaces the dependency on sglang.srt.utils.tt_utils.
-    """
-    try:
-        # Get device configuration
-        num_devices = int(os.environ.get("TT_NUM_DEVICES", "8"))
-        
-        # Create mesh device
-        mesh_device = ttnn.open_mesh_device(
-            ttnn.MeshShape(1, num_devices),
-            device_ids=list(range(num_devices))
-        )
-        
-        logger.info(f"Opened TT mesh device with {num_devices} devices, trace_mode={trace_mode}")
-        
-        return mesh_device
-        
-    except Exception as e:
-        logger.error(f"Failed to open TT mesh device: {e}")
-        raise
+def open_mesh_device(override_tt_config, trace_mode, dp_rank=0):
+    assert dp_rank == 0, "open_mesh_device must run on DP rank 0"
+    mesh_grid = get_mesh_grid(dp_rank)
+
+    device_params = device_params_from_override_tt_config(
+        override_tt_config, trace_mode)
+
+    # Set fabric before opening the device
+    num_devices_requested = mesh_grid[0] * mesh_grid[1]
+    set_fabric(override_tt_config, num_devices_requested)
+
+    mesh_device = ttnn.open_mesh_device(
+        ttnn.MeshShape(*mesh_grid),
+        dispatch_core_config=get_dispatch_core_config(override_tt_config),
+        **device_params,
+    )
+    logger.info("multidevice with %d devices and grid %s is created",
+                mesh_device.get_num_devices(), mesh_grid)
+    return mesh_device
 
 
 def close_mesh_device(mesh_device, override_tt_config):

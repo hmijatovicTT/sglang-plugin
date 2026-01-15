@@ -9,6 +9,11 @@ import sys
 import subprocess
 import argparse
 
+# Add sglang source code to Python path
+SGLANG_SOURCE_PATH = "/localdev/hmijatovic/sglang/python"
+if SGLANG_SOURCE_PATH not in sys.path:
+    sys.path.insert(0, SGLANG_SOURCE_PATH)
+
 def setup_tt_environment():
     """Setup TT-Metal environment variables similar to your working command."""
     # TT-Metal environment
@@ -19,19 +24,18 @@ def setup_tt_environment():
     os.environ["LD_PRELOAD"] = "/lib/x86_64-linux-gnu/libnuma.so.1"
     os.environ["TRITON_CPU_ONLY"] = "1"
     os.environ["TRITON_INTERPRET"] = "1"
+    os.environ["SGLANG_TT_PLUGIN"] = "1"  # Enable auto-registration
     
-    # Add TT plugin to Python path
-    plugin_path = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-    if plugin_path not in sys.path:
-        sys.path.insert(0, plugin_path)
-    
-    # Import TT plugin to register models
+    # Import TT plugin to monkey-patch SGLang (this will be done after SGLang loads)
     try:
-        import sglang_tt_plugin
-        print("TT Plugin loaded successfully")
-        print("TTLlamaForCausalLM should now be registered")
+        # Just test that the plugin is available, don't actually import it yet
+        import importlib.util
+        spec = importlib.util.find_spec("sglang_tt_plugin")
+        if spec is None:
+            raise ImportError("Plugin not found")
+        print("[TT-Plugin] Plugin is available and ready for monkey-patching")
     except ImportError as e:
-        print(f"Failed to load TT plugin: {e}")
+        print(f"[TT-Plugin] TT plugin not available: {e}")
         sys.exit(1)
 
 def main():
@@ -71,9 +75,39 @@ def main():
     print(f"Launching SGLang TT server with command: {' '.join(cmd)}")
     print("Looking for 'Overwriting LlamaForCausalLM with TTLlamaForCausalLM' message...")
     
+    # Build command that loads plugin AFTER SGLang starts
+    python_cmd = [
+        sys.executable, 
+        "-c", 
+        f"""
+import os
+import sys
+
+# Import SGLang first to let it initialize with working sgl_kernel
+print('[TT-Plugin] Starting SGLang with working sgl_kernel...')
+import runpy
+sys.argv = {repr(['python'] + cmd[1:])}
+
+# Monkey-patch SGLang during startup
+print('[TT-Plugin] Applying TT plugin monkey-patch...')
+try:
+    import sglang_tt_plugin
+    success = sglang_tt_plugin.monkey_patch_sglang()
+    if success:
+        print('[TT-Plugin] Successfully patched SGLang with TT models')
+    else:
+        print('[TT-Plugin] Failed to patch SGLang, using default models')
+except ImportError as e:
+    print(f'[TT-Plugin] Failed to load TT plugin: {{e}}')
+
+# Now run SGLang
+runpy.run_module('sglang.launch_server', run_name='__main__')
+"""
+    ]
+    
     # Launch server
     try:
-        subprocess.run(cmd, check=True)
+        subprocess.run(python_cmd, check=True)
     except subprocess.CalledProcessError as e:
         print(f"Server launch failed: {e}")
         sys.exit(1)

@@ -1,0 +1,31 @@
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Package build files  
+*.egg-info/
+build/
+dist/
+
+# Model cache and weights (too large for git)
+model_cache/
+*.safetensors
+*.bin
+*.pt
+*.pth
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.log

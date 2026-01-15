@@ -1,5 +1,12 @@
 """
 SGLang TT-Metal Plugin Setup
+
+IMPORTANT INSTALLATION ORDER:
+1. Install CPU PyTorch first: pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+2. Install sglang: pip install sglang
+3. Install this plugin: pip install -e .
+
+This ensures sgl_kernel and common_ops are built for CPU, not GPU.
 """
 
 from setuptools import setup, find_packages
@@ -30,9 +37,11 @@ setup(
     ],
     python_requires=">=3.8",
     install_requires=[
-        "torch",
-        "ttnn",
+        # NOTE: Do NOT include torch here - user must install CPU PyTorch FIRST
+        # to ensure sgl_kernel builds for CPU. See installation instructions.
+        # "sglang",  # Using source code version instead of pip
         "transformers",
+        # ttnn should be available from tt-metal environment
     ],
     extras_require={
         "test": [

@@ -1,14 +1,15 @@
 import torch
 from torch import nn
 import ttnn
+from contextlib import suppress
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
 from sglang.srt.layers.logits_processor import LogitsProcessorOutput
 from models.tt_transformers.tt.generator_sglang import LlamaForCausalLM as TT_Llama
 from models.tt_transformers.tt.model_config import DecodersPrecision
-from ..utils.tt_utils import open_mesh_device  # Use plugin's utils instead
-import logging
+from sglang.srt.utils.tt_utils import open_mesh_device
 from sglang.srt.server_args import get_global_server_args
 import os
+import logging
 
 logger = logging.getLogger(__name__)
 
@@ -172,7 +173,7 @@ class TTModels(nn.Module):
             )
 
             logger.info(
-            f"tt_model.decode_forward executed in plugin"
+            f"tt_model.decode_forward executed in plugin mode"
             )
 
             # Slice to actual batch, then squeeze sequence dim
@@ -261,6 +262,20 @@ class TTModels(nn.Module):
         logger.info(
             f"tt_metal.allocate_kv_cache executed"
         )
+
+    def __del__(self):
+        """Destructor to clean up TT resources"""
+        with suppress(AttributeError):
+            # Delete TT model first in case there are model artifacts
+            if hasattr(self, 'tt_model'):
+                del self.tt_model
+            
+            # Close mesh device
+            if hasattr(self, 'mesh_device') and self.mesh_device is not None:
+                from ..utils import close_mesh_device
+                close_mesh_device(self.mesh_device, self.override_tt_config)
+                del self.mesh_device
+                logger.info("Mesh device closed in destructor")
 
 class TTLlamaForCausalLM(TTModels):
     def __init__(self, config, quant_config=None, tt_model=None, **kwargs):
