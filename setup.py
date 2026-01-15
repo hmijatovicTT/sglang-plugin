@@ -30,7 +30,8 @@ setup(
     ],
     python_requires=">=3.8",
     install_requires=[
-        "torch",
+        # NOTE: torch is NOT included here - user must install CPU PyTorch FIRST
+        # See INSTALLATION.md for correct installation order
         "ttnn",
         "transformers",
     ],

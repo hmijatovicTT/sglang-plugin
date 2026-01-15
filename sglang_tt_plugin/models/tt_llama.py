@@ -1,11 +1,12 @@
 import torch
 from torch import nn
 import ttnn
+from contextlib import suppress
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
 from sglang.srt.layers.logits_processor import LogitsProcessorOutput
 from models.tt_transformers.tt.generator_sglang import LlamaForCausalLM as TT_Llama
 from models.tt_transformers.tt.model_config import DecodersPrecision
-from ..utils.tt_utils import open_mesh_device  # Use plugin's utils instead
+from ..utils.tt_utils import open_mesh_device, close_mesh_device  # Use plugin's tt_utils
 import logging
 from sglang.srt.server_args import get_global_server_args
 import os
@@ -75,16 +76,30 @@ class TTModels(nn.Module):
         return self.kv_caches
 
     def _build_page_table(self, forward_batch):
+        """Build page table for TT-Metal paged attention.
+        
+        Uses SGLang's token pool indices to derive block indices.
+        This ensures we use DIFFERENT blocks than warmup (which always uses block 0).
+        After warmup uses indices 0-127 (block 0), real requests get indices 128+,
+        so they use block 1+ which contains no warmup garbage.
+        """
         req_to_token_pool = forward_batch.req_to_token_pool
         req_pool_indices = forward_batch.req_pool_indices
         
-        # (batch_size, max_len)
+        # (batch_size, max_len) - contains SGLang's global token indices
         batch_req_tokens = req_to_token_pool.req_to_token[req_pool_indices]
         
-        # Subsample to get block indices
-        # We take the first token index of each block.
+        # Subsample to get block indices: take first token of each block
         # (batch_size, max_blocks)
         page_table = batch_req_tokens[:, ::self.block_size] // self.block_size
+        
+        # Ensure int32 dtype for TT-Metal
+        page_table = page_table.to(torch.int32)
+        
+        logger.info(f"[DEBUG] _build_page_table: block_size={self.block_size}, seq_lens={forward_batch.seq_lens.tolist()}")
+        logger.info(f"[DEBUG] batch_req_tokens[0,:10]={batch_req_tokens[0,:min(10, batch_req_tokens.shape[1])].tolist()}")
+        logger.info(f"[DEBUG] page_table shape={page_table.shape}, page_table[0,:5]={page_table[0,:min(5, page_table.shape[1])].tolist()}")
+        
         return page_table
 
     def forward(
@@ -105,6 +120,8 @@ class TTModels(nn.Module):
             batch_size = forward_batch.batch_size
             seq_lens = forward_batch.seq_lens
             max_len = torch.max(seq_lens).item()
+            
+            logger.info(f"[DEBUG] PREFILL: batch_size={batch_size}, seq_lens={seq_lens.tolist()}, positions={positions.tolist()[:10]}...")
             
             # Create padded tokens tensor
             padded_tokens = torch.zeros((batch_size, max_len), dtype=torch.long, device=input_ids.device)
@@ -139,6 +156,8 @@ class TTModels(nn.Module):
             # input_ids is (batch,)
             tokens = input_ids.unsqueeze(1)
             start_pos = positions  # (batch,)
+            
+            logger.info(f"[DEBUG] DECODE: start_pos={start_pos.tolist()}, token={input_ids.tolist()}")
 
             # TT decode expects per-device batch == max_batch_size; pad then slice back
             dp = getattr(self.tt_model, "data_parallel", len(self.tt_model.model))
@@ -162,7 +181,7 @@ class TTModels(nn.Module):
                     pad_pt = torch.zeros((pad_n, pt_width), dtype=page_table.dtype, device=page_table.device)
                     page_table = torch.cat([page_table, pad_pt], dim=0)
 
-            logits = self.tt_model.decode_forward(
+            decode_output = self.tt_model.decode_forward(
                 tokens=tokens,
                 start_pos=start_pos,
                 page_table=page_table,
@@ -172,8 +191,14 @@ class TTModels(nn.Module):
             )
 
             logger.info(
-            f"tt_model.decode_forward executed in plugin"
+            f"tt_model.decode_forward executed"
             )
+
+            # decode_forward returns (logits, log_probs) tuple
+            if isinstance(decode_output, tuple):
+                logits = decode_output[0]
+            else:
+                logits = decode_output
 
             # Slice to actual batch, then squeeze sequence dim
             logits = logits[:actual_bsz]
@@ -262,9 +287,30 @@ class TTModels(nn.Module):
             f"tt_metal.allocate_kv_cache executed"
         )
 
+    def __del__(self):
+        """Destructor to clean up TT resources"""
+        with suppress(AttributeError):
+            # Delete TT model first in case there are model artifacts
+            if hasattr(self, 'tt_model'):
+                del self.tt_model
+            
+            # Close mesh device
+            if hasattr(self, 'mesh_device') and self.mesh_device is not None:
+                close_mesh_device(self.mesh_device, self.override_tt_config)
+                del self.mesh_device
+                logger.info("Mesh device closed in destructor")
+
 class TTLlamaForCausalLM(TTModels):
     def __init__(self, config, quant_config=None, tt_model=None, **kwargs):
         super().__init__(config, quant_config, tt_model, **kwargs)
+
+        # Cap max_seq_len for N150 (single device Wormhole B0)
+        # TT-Metal raises error if max_seq_len > 65536 on N150 for 8B/11B models
+        num_devices = self.mesh_device.get_num_devices()
+        is_wormhole = "wormhole_b0" in ttnn.get_arch_name()
+        if num_devices == 1 and is_wormhole and self.max_seq_len > 65536:
+            logger.info(f"[TT-Plugin] Capping max_seq_len from {self.max_seq_len} to 65536 for N150")
+            self.max_seq_len = 65536
 
         self.tt_model = TT_Llama.initialize_vllm_model(
             config,
