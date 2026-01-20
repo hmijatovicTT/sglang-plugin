@@ -9,10 +9,8 @@ import sys
 # Set version at module level
 __version__ = "0.1.0"
 
-# CRITICAL: Set CPU-only environment variables FIRST
-# These must be set before any PyTorch or SGLang imports
-os.environ["SGLANG_USE_CPU_ENGINE"] = "1"
-os.environ["SGLANG_DISABLE_CUDA_KERNEL"] = "1"  # Updated from deprecated SGL_DISABLE_CUDA_KERNEL
+# Force CPU-only mode for sgl_kernel to avoid CUDA dependency issues
+os.environ["SGL_DISABLE_CUDA_KERNEL"] = "1" 
 os.environ["CUDA_VISIBLE_DEVICES"] = ""
 # Prevent torch compilation issues
 os.environ["TORCH_COMPILE_DISABLE"] = "1"
@@ -21,90 +19,78 @@ os.environ["TORCHINDUCTOR_DISABLE"] = "1"
 logger = logging.getLogger(__name__)
 
 def register_tt_models():
-    """Register TT-Metal models by overriding ModelRegistry.
-    This must be called AFTER SGLang is imported."""
-    import types
-    
+    """Register TT-Metal models with SGLang's model registry."""
     try:
+        # Check if TT-Metal is available
         import ttnn
-        print("[TT-Plugin] TT-Metal (ttnn) is available", file=sys.stderr, flush=True)
+        logger.info("[TT-Plugin] TT-Metal (ttnn) is available")
         
-        from .models.tt_llama import TTLlamaForCausalLM
+        # Import all TT model classes
+        from .models.tt_llm import (
+            TTLlamaForCausalLM,
+            TTQwenForCausalLM,
+            TTMistralForCausalLM,
+            TTGptOssForCausalLM,
+        )
         
-        from sglang.srt.models.registry import ModelRegistry
+        # Mapping from HuggingFace architecture names to TT model classes
+        TT_MODEL_REGISTRY = {
+            "LlamaForCausalLM": TTLlamaForCausalLM,      # Llama-3.1-8B, Llama-3.1-70B, etc.
+            "Qwen2ForCausalLM": TTQwenForCausalLM,       # Qwen2.5-7B, Qwen2.5-14B, etc.
+            "MistralForCausalLM": TTMistralForCausalLM,  # Mistral-7B
+            "GptOssForCausalLM": TTGptOssForCausalLM,    # GPT-OSS
+        }
         
-        # Force registry population by trying to resolve a model
-        # This ensures the registry is populated before we patch it
+        # CRITICAL: Directly patch SGLang's ModelRegistry
         try:
-            ModelRegistry.resolve_model_cls(["LlamaForCausalLM"])
-        except:
-            pass  # Ignore errors, we just want to trigger population
-        
-        # Now overwrite the registry entry
-        ModelRegistry.models["LlamaForCausalLM"] = TTLlamaForCausalLM
-        
-        # Also patch _try_load_model_cls to ensure it returns our class
-        original_try_load = ModelRegistry._try_load_model_cls
-        
-        def patched_try_load(self, model_arch):
-            if model_arch == "LlamaForCausalLM":
-                print(f"[TT-Plugin] _try_load_model_cls intercepted for {model_arch}, returning TTLlamaForCausalLM", file=sys.stderr, flush=True)
-                return TTLlamaForCausalLM
-            return original_try_load(model_arch)
-        
-        ModelRegistry._try_load_model_cls = types.MethodType(patched_try_load, ModelRegistry)
-        
-        # Verify the patch
-        test_result = ModelRegistry._try_load_model_cls("LlamaForCausalLM")
-        if test_result is TTLlamaForCausalLM:
-            print("[TT-Plugin] ✓ Successfully patched ModelRegistry - TTLlamaForCausalLM will be used", file=sys.stderr, flush=True)
-        else:
-            print(f"[TT-Plugin] ✗ Patch verification failed! Got: {test_result}", file=sys.stderr, flush=True)
-        
-        return True
+            from sglang.srt.models.registry import ModelRegistry
+            
+            # Override all supported architectures in the registry
+            for arch_name, tt_class in TT_MODEL_REGISTRY.items():
+                ModelRegistry.models[arch_name] = tt_class
+                logger.info(f"[TT-Plugin] Registered {arch_name} -> {tt_class.__name__}")
+            
+            # Also patch _try_load_model_cls to intercept model loading
+            original_try_load = ModelRegistry._try_load_model_cls
+            
+            @staticmethod
+            def patched_try_load_model_cls(architectures):
+                for arch in architectures:
+                    if arch in TT_MODEL_REGISTRY:
+                        tt_class = TT_MODEL_REGISTRY[arch]
+                        logger.info(f"[TT-Plugin] Intercepted load for {arch}, returning {tt_class.__name__}")
+                        return tt_class
+                return original_try_load(architectures)
+            
+            ModelRegistry._try_load_model_cls = patched_try_load_model_cls
+            logger.info(f"[TT-Plugin] ✓ Successfully patched ModelRegistry with {len(TT_MODEL_REGISTRY)} TT models")
+            
+        except ImportError as e:
+            logger.warning(f"[TT-Plugin] Could not import ModelRegistry: {e}")
         
     except ImportError as e:
-        print(f"[TT-Plugin] TT-Metal not available: {e}", file=sys.stderr, flush=True)
-        return False
+        logger.warning(f"[TT-Plugin] TT-Metal not available: {e}")
     except Exception as e:
-        print(f"[TT-Plugin] Error registering TT models: {e}", file=sys.stderr, flush=True)
-        import traceback
-        traceback.print_exc()
-        return False
+        logger.error(f"[TT-Plugin] Error registering TT models: {e}")
 
-# Auto-register when SGLang is imported (for subprocess compatibility)
-# This ensures the patch works in both main process and subprocesses
-def _auto_register_if_sglang_imported():
-    """Auto-register TT models if SGLang is already imported."""
-    try:
-        import sglang.srt.models.registry
-        from sglang.srt.models.registry import ModelRegistry
-        # Check if external package registration already happened
-        if "LlamaForCausalLM" in ModelRegistry.models:
-            current_cls = ModelRegistry.models["LlamaForCausalLM"]
-            from .models.tt_llama import TTLlamaForCausalLM
-            if current_cls is not TTLlamaForCausalLM:
-                # External package didn't work, apply manual patch
-                print("[TT-Plugin] External package registration didn't override, applying manual patch", file=sys.stderr, flush=True)
-                register_tt_models()
-            else:
-                print("[TT-Plugin] External package registration successful", file=sys.stderr, flush=True)
-        else:
-            # Registry not populated yet, register manually
-            register_tt_models()
-    except ImportError:
-        # SGLang not imported yet, that's fine
-        pass
+# CRITICAL: Register IMMEDIATELY on import, before SGLang can load anything
+register_tt_models()
 
-# Try to auto-register (will work if SGLang is already imported)
-_auto_register_if_sglang_imported()
-
-from .models.tt_llama import TTLlamaForCausalLM, TTModels
+from .models.tt_llm import (
+    TTModels,
+    TTLlamaForCausalLM,
+    TTQwenForCausalLM,
+    TTMistralForCausalLM,
+    TTGptOssForCausalLM,
+)
 from .utils.tt_utils import open_mesh_device
 
 __all__ = [
-    "TTLlamaForCausalLM",
     "TTModels",
+    "TTLlamaForCausalLM",
+    "TTQwenForCausalLM",
+    "TTMistralForCausalLM",
+    "TTGptOssForCausalLM",
     "open_mesh_device", 
     "register_tt_models",
     "__version__",

@@ -1,97 +1,77 @@
-# SGLang TT-Metal Plugin
+ 
+1.Prepare sglang from source code for cpu ( untill there is proper support for cpu compatible sglang via pip install )
 
-This plugin adds TT-Metal device support to SGLang, allowing you to run language model inference on TT-Metal hardware accelerators.
+git clone https://github.com/sgl-project/sglang.git
+cd sglang
 
-## Installation
+2. Install SGLang Python Package and Dependencies
 
-⚠️ **CRITICAL**: For CPU-only setups, you must install CPU PyTorch **BEFORE** SGLang. See [INSTALLATION.md](INSTALLATION.md) for detailed instructions.
+cd python
+cp pyproject_cpu.toml pyproject.toml
+pip install --upgrade pip setuptools
+pip install .
 
-### Quick Installation
+3. Install CPU Versions of torch, torchvision, and triton
 
-1. **Uninstall conflicting packages:**
-   ```bash
-   pip uninstall -y torch torchvision torchaudio sglang sgl-kernel
-   pip cache purge
-   ```
+pip install torch==2.9.0+cpu torchvision==0.24.0+cpu triton==3.5.0 --index-url https://download.pytorch.org/whl/cpu
 
-2. **Install CPU PyTorch FIRST:**
-   ```bash
-   pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
-   ```
+        If you get errors about missing wheels, check the PyTorch CPU install guide for the latest versions and commands.
 
-3. **Set environment variable:**
-   ```bash
-   export SGLANG_USE_CPU_ENGINE=1
-   ```
+4. Build the CPU Backend Kernels
 
-4. **Install SGLang:**
-   ```bash
-   pip install sglang
-   ```
+cd ../sgl-kernel
+cp pyproject_cpu.toml pyproject.toml
+pip install .
 
-5. **Install the plugin:**
-   ```bash
-   cd sglang-plugin
-   pip install -e .
-   ```
+5. Set Required Environment Variables
 
-For detailed instructions and troubleshooting, see [INSTALLATION.md](INSTALLATION.md).
+export SGLANG_USE_CPU_ENGINE=1
+export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu
+export LD_PRELOAD=${LD_PRELOAD}:/opt/sglang-venv/lib/libiomp5.so:${LD_LIBRARY_PATH}/libtcmalloc.so.4:${LD_LIBRARY_PATH}/libtbbmalloc.so.2
 
-## Usage
+Adjust /opt/sglang-venv if your venv is elsewhere. also ld_preload is not necessary if it fails
 
-Simply import the plugin before starting your SGLang server:
+6. Launch the SGLang Server (CPU Mode)
 
-```python
-import sglang_tt_plugin  # This registers TT-Metal models automatically
+python -m sglang.launch_server \
+    --model meta-llama/Llama-3.2-3B-Instruct \
+    --trust-remote-code \
+    --disable-overlap-schedule \
+    --device cpu \
+    --host 0.0.0.0 \
+    --tp 6
 
-# Now start SGLang normally
-python -m sglang.launch_server --model-path meta-llama/Llama-3.1-8B-Instruct
-```
+SGLang TT-Metal Plugin Setup
 
-Or use environment variable:
+1: Activate TT-Metal Environment
 
-```bash
-export SGLANG_TT_PLUGIN=1
-python -m sglang.launch_server --model-path meta-llama/Llama-3.1-8B-Instruct
-```
+source localdev/.../tt-metal/python_env/bin/activate
 
-## Features
+2: Install the TT Plugin
 
-- **Automatic Model Registration**: TT-Metal models are automatically registered when the plugin is imported
-- **Drop-in Replacement**: Works with existing SGLang configurations
-- **TT-Metal Integration**: Leverages TT-Metal's optimized inference capabilities
-- **Clean Separation**: No modifications to SGLang core code required
+cd ../sglang-plugin
+pip install -e .
 
-## Requirements
+3: Create the .pth File for Subprocess Patching
 
-- **CPU PyTorch** (must be installed FIRST - see installation instructions)
-- SGLang >= 0.3.0
-- TT-Metal (ttnn)
-- Python >= 3.8
+echo 'import sglang_tt_plugin' > localdev/.../tt-metal/python_env/lib/python3.10/site-packages/sglang_tt_plugin.pth
+cat /localdev/.../tt-metal/python_env/lib/python3.10/site-packages/sglang_tt_plugin.pth
 
-**Note**: This plugin requires CPU-only PyTorch. GPU PyTorch will cause `sgl_kernel`/`common_ops` errors.
+4: Verify Installation
 
-## Architecture
+python -c "import sglang_tt_plugin; print('Plugin version:', sglang_tt_plugin.__version__)"
+which sglang-tt-server
 
-The plugin provides:
-- `TTLlamaForCausalLM`: TT-Metal optimized Llama implementation
-- Utility functions for TT-Metal device management
-- Automatic registration with SGLang's model registry
+5: Run the Server
 
-## Supported Models
+unset LD_PRELOAD
+sglang-tt-server --model-path meta-llama/Llama-3.1-8B-Instruct --page-size 128
 
-Currently supported:
-- LlamaForCausalLM (all Llama variants)
+"test" with some curl command: 
+curl -s http://127.0.0.1:30000/v1/completions   -H "Content-Type: application/json"   -d '{
+    "model": "meta-llama/Llama-3.1-8B-Instruct",
+    "prompt": "what is a butterfly?",
+    "max_tokens": 64,
+    "temperature": 0.7
+  }' | jq -r '.choices[0].text'
 
-## Development
-
-To develop the plugin:
-
-1. Clone this repository
-2. Install in development mode: `pip install -e .`
-3. Make changes to the plugin code
-4. Test with SGLang
-
-## License
-
-Apache 2.0
