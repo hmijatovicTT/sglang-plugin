@@ -13,7 +13,7 @@ pip install .
 
 3. Install CPU Versions of torch, torchvision, and triton
 
-pip install torch==2.9.0+cpu torchvision==0.24.0+cpu triton==3.5.0 --index-url https://download.pytorch.org/whl/cpu
+pip install torch==2.9.0+cpu torchvision==0.24.0+cpu triton==3.5.0 --index-url https://download.pytorch.org/whlcpu
 
         If you get errors about missing wheels, check the PyTorch CPU install guide for the latest versions and commands.
 
@@ -51,11 +51,6 @@ source localdev/.../tt-metal/python_env/bin/activate
 
 cd ../sglang-plugin
 pip install -e .
-
-3: Create the .pth File for Subprocess Patching
-
-echo 'import sglang_tt_plugin' > localdev/.../tt-metal/python_env/lib/python3.10/site-packages/sglang_tt_plugin.pth
-cat /localdev/.../tt-metal/python_env/lib/python3.10/site-packages/sglang_tt_plugin.pth
 
 4: Verify Installation
 

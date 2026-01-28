@@ -1,17 +1,9 @@
 import torch
 from torch import nn
-import ttnn
 from contextlib import suppress
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
 from sglang.srt.layers.logits_processor import LogitsProcessorOutput
-from models.tt_transformers.tt.generator_sglang import (
-    LlamaForCausalLM as TT_Llama,
-    QwenForCausalLM as TT_Qwen,
-    MistralForCausalLM as TT_Mistral,
-    GptOssForCausalLM as TT_GptOss,
-)
-from models.tt_transformers.tt.model_config import DecodersPrecision
-from ..utils.tt_utils import open_mesh_device, close_mesh_device, get_mesh_grid
+from ..utils.tt_utils import BaseMetalDeviceRunner
 import logging
 from sglang.srt.server_args import get_global_server_args
 import os
@@ -37,11 +29,12 @@ class TTModels(nn.Module):
             self.override_tt_config = None
             
             logger.info(f"[TT-SGLANG] Model init: max_batch_size={self.max_batch_size}, "f"max_seq_len={self.max_seq_len}, page_size={self.block_size}")
-            # Initialize TT device (rank 0 for single-device, or from distributed if multi-device)
+            # Initialize TT device using BaseMetalDeviceRunner
             rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
             os.environ["HF_MODEL"] = get_global_server_args().model_path
 
-            self.mesh_device =open_mesh_device(self.override_tt_config, trace_mode=False, dp_rank=rank) #open communication with device
+            self.device_runner = BaseMetalDeviceRunner(device_id=str(rank))
+            self.mesh_device = self.device_runner.set_device()
 
     def forward(
         self,
@@ -66,7 +59,7 @@ class TTModels(nn.Module):
                 page_table=page_table,
                 kv_cache=self.kv_caches,
                 prompt_lens=prompt_lens,
-                enable_trace=False 
+                enable_trace=True 
             )
             logger.info( f"tt_model.prefill_forward executed")
             # returns scores for every possible next word and sglang picks the most likely one ( it will become the next token )
@@ -84,7 +77,7 @@ class TTModels(nn.Module):
                 start_pos=start_pos,
                 page_table=page_table,
                 kv_cache=self.kv_caches,
-                enable_trace=False,
+                enable_trace=True,
                 read_from_device=True,
             )
             logger.info(f"tt_model.decode_forward executed")
@@ -101,8 +94,10 @@ class TTModels(nn.Module):
         Allocate the actual KV cache on the TT-Metal device.
         This method should be called from the SGlang's ModelRunner after the pool is initialized.
         """
+        import ttnn
         # Get mesh grid and hardware info
-        mesh_grid = get_mesh_grid(dp_rank=0)
+        device_ids = ttnn.get_device_ids()
+        mesh_grid = (1, len(device_ids))
         num_devices_per_model = mesh_grid[0] * mesh_grid[1]
         is_wormhole = "wormhole_b0" in ttnn.get_arch_name()
         model_path = get_global_server_args().model_path or ""
@@ -244,10 +239,9 @@ class TTModels(nn.Module):
         with suppress(AttributeError):
             if hasattr(self, 'tt_model'): # Delete TT model first in case there are model artifacts
                 del self.tt_model
-            # Close mesh device
-            if hasattr(self, 'mesh_device') and self.mesh_device is not None: 
-                close_mesh_device(self.mesh_device, self.override_tt_config)
-                del self.mesh_device
+            # Close mesh device using device runner
+            if hasattr(self, 'device_runner') and self.device_runner is not None:
+                self.device_runner.close_device()
                 logger.info("Mesh device closed in destructor")
 
 
@@ -257,6 +251,7 @@ class TTLlamaForCausalLM(TTModels):
     def __init__(self, config, quant_config=None, tt_model=None, **kwargs):
         super().__init__(config, quant_config, tt_model, **kwargs)
 
+        from models.tt_transformers.tt.generator_sglang import LlamaForCausalLM as TT_Llama
         self.tt_model = TT_Llama.initialize_vllm_model(
             config,
             self.mesh_device,
@@ -274,6 +269,7 @@ class TTQwenForCausalLM(TTModels):
     def __init__(self, config, quant_config=None, tt_model=None, **kwargs):
         super().__init__(config, quant_config, tt_model, **kwargs)
 
+        from models.tt_transformers.tt.generator_sglang import QwenForCausalLM as TT_Qwen
         self.tt_model = TT_Qwen.initialize_vllm_model(
             config,
             self.mesh_device,
@@ -291,6 +287,7 @@ class TTMistralForCausalLM(TTModels):
     def __init__(self, config, quant_config=None, tt_model=None, **kwargs):
         super().__init__(config, quant_config, tt_model, **kwargs)
 
+        from models.tt_transformers.tt.generator_sglang import MistralForCausalLM as TT_Mistral
         self.tt_model = TT_Mistral.initialize_vllm_model(
             config,
             self.mesh_device,
@@ -308,6 +305,7 @@ class TTGptOssForCausalLM(TTModels):
     def __init__(self, config, quant_config=None, tt_model=None, **kwargs):
         super().__init__(config, quant_config, tt_model, **kwargs)
 
+        from models.tt_transformers.tt.generator_sglang import GptOssForCausalLM as TT_GptOss
         self.tt_model = TT_GptOss.initialize_vllm_model(
             config,
             self.mesh_device,
