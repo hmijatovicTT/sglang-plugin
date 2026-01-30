@@ -14,6 +14,12 @@ logger = logging.getLogger(__name__)
 class TTModels(nn.Module):
     def __init__(self, config, quant_config=None, tt_model=None, **kwargs):
         super().__init__()
+        
+        # Setup worker environment FIRST, before any tt-metal imports or model init
+        # This sets TT_METAL_CACHE and TT_CACHE_HOME per worker for isolation
+        from sglang_tt_plugin.worker_setup.worker_setup import setup_worker_from_process_title
+        setup_worker_from_process_title()
+        
         self.config = config # hf model config
         self.kv_caches = None # will be allocated on device in allocate_on_device()
         self.block_size = get_global_server_args().page_size or 64  # Block size comes from server's --page-size arg Fall back to 64 if server args not yet available
@@ -24,7 +30,9 @@ class TTModels(nn.Module):
             server_args = get_global_server_args() # Initialize TT model - get params from server args 
             self.max_batch_size = server_args.max_running_requests or 32 #fallback to 32 if not set
             self.max_seq_len = server_args.context_length 
-            self.tt_data_parallel = server_args.dp_size  
+            # For multi-worker data parallelism, each SGLang worker handles its own DP slice
+            # so tt_data_parallel should be 1 per worker (SGLang's dp_size workers provide the parallelism)
+            self.tt_data_parallel = 1  # Each worker uses all devices on its assigned slot
             self.optimizations = os.environ.get("TT_METAL_OPTIMIZATIONS", "performance")  # From --optimizations CLI arg
             self.override_tt_config = None
             
@@ -36,7 +44,7 @@ class TTModels(nn.Module):
             self.device_runner = BaseMetalDeviceRunner(device_id=str(rank))
             self.mesh_device = self.device_runner.set_device()
 
-    def forward(
+    def forward(    # function running on either prefil or decode mode
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
@@ -61,7 +69,7 @@ class TTModels(nn.Module):
                 prompt_lens=prompt_lens,
                 enable_trace=True 
             )
-            logger.info( f"tt_model.prefill_forward executed")
+            logger.debug("tt_model.prefill_forward executed")
             # returns scores for every possible next word and sglang picks the most likely one ( it will become the next token )
             return LogitsProcessorOutput(next_token_logits=logits.squeeze(1))
 
@@ -80,7 +88,7 @@ class TTModels(nn.Module):
                 enable_trace=True,
                 read_from_device=True,
             )
-            logger.info(f"tt_model.decode_forward executed")
+            logger.debug("tt_model.decode_forward executed")
             # returns scores for every possible next word and sglang picks the most likely one ( it will become the next token )
             logits = decode_output[0]
             logits = logits[:actual_bsz] # ignore output of padded requests
@@ -89,22 +97,18 @@ class TTModels(nn.Module):
         else:
             raise ValueError(f"Unsupported forward mode: {forward_batch.forward_mode}")
 
-    def allocate_on_device(self):
+    def allocate_on_device(self):   #function aloocating kv cache
         """
         Allocate the actual KV cache on the TT-Metal device.
         This method should be called from the SGlang's ModelRunner after the pool is initialized.
         """
         import ttnn
-        # Get mesh grid and hardware info
-        device_ids = ttnn.get_device_ids()
-        mesh_grid = (1, len(device_ids))
-        num_devices_per_model = mesh_grid[0] * mesh_grid[1]
+        # Get hardware info from mesh_device (already opened by device_runner in tt_utils)
+        num_devices_per_model = self.mesh_device.get_num_devices()
         is_wormhole = "wormhole_b0" in ttnn.get_arch_name()
         model_path = get_global_server_args().model_path or ""
         # Get max tokens based on hardware + model configuration
         max_tokens_all_users = self._get_max_tokens_for_hardware(model_path, num_devices_per_model, is_wormhole)
-        
-        logger.info(f"[TT-SGLANG] Token limit: {max_tokens_all_users} "f"(model={model_path}, devices={num_devices_per_model}, wormhole={is_wormhole})")
         
         # Build KV Cache Shape
         # 1. Account for worst-case batch allocation, Each user in batch might touch a new block
@@ -127,15 +131,13 @@ class TTModels(nn.Module):
         # Get num_layers from config (like vLLM's model_config.get_num_layers_by_block_type())
         num_layers = getattr(self.config, 'num_hidden_layers', getattr(self.config, 'n_layers', getattr(self.config, 'n_layer', 32)))  # Llama/Mistral, GPT-Neo, GPT-2
         dtype = torch.bfloat16
-
-        logger.info(f"Allocating KV Cache on device with shape: {kv_cache_shape}, dtype: {dtype}, layers: {num_layers}")
         # Allocate KV cache directly on TT-Metal
         self.kv_caches = self.tt_model.allocate_kv_cache(
             kv_cache_shape=kv_cache_shape,
             dtype=dtype,
             num_layers=num_layers
         )
-        logger.info(f"tt_model.allocate_kv_cache executed")
+        logger.debug("tt_model.allocate_kv_cache executed")
 
     def load_weights(self, weights): # TT model loads weights during initialization
         pass

@@ -35,10 +35,9 @@ class BaseMetalDeviceRunner(ABC):
 
     def set_device(self):
         if self.ttnn_device is None:
-            # Setup worker environment (device visibility, mesh config, thread limits)
-            # Extracts dp_rank from process title and configures TT_VISIBLE_DEVICES
-            from sglang_tt_plugin.patching.patching_worker import patch_worker_setup
-            patch_worker_setup()
+            # Worker environment setup (TT_VISIBLE_DEVICES, TT_METAL_CACHE, TT_CACHE_HOME)
+            # is done in TTModels.__init__ BEFORE this is called, to ensure it runs
+            # before any tt-metal imports that might read cache paths
             
             # Now open device - will see only the devices assigned to this worker
             self.ttnn_device = self._mesh_device()
@@ -106,16 +105,27 @@ class BaseMetalDeviceRunner(ABC):
             if not device_ids:
                 raise RuntimeError("No TTNN devices available")
             
-            num_devices = len(device_ids)
+            num_devices_available = len(device_ids)
             self.logger.info(
-                f"Device {self.device_id}: Found {num_devices} available TTNN devices: {device_ids}"
+                f"Device {self.device_id}: Found {num_devices_available} available TTNN devices: {device_ids}"
             )
 
-            # Get mesh shape from device IDs count
-            mesh_shape = ttnn.MeshShape(1, num_devices)
+            # Get mesh shape from DEVICE_MESH_SHAPE env var (set by --mesh-shape CLI arg)
+            mesh_shape_str = os.environ.get("DEVICE_MESH_SHAPE")
+            if mesh_shape_str:
+                rows, cols = map(int, mesh_shape_str.split(","))
+                mesh_shape = ttnn.MeshShape(rows, cols)
+                num_devices_requested = rows * cols
+                self.logger.info(f"Device {self.device_id}: Using mesh shape ({rows}, {cols}) from --mesh-shape CLI arg")
+            else:
+                # Default: 1 row, N columns (width sharding for LLMs)
+                mesh_shape = ttnn.MeshShape(1, num_devices_available)
+                num_devices_requested = num_devices_available
+                self.logger.info(f"Device {self.device_id}: Using default mesh shape (1, {num_devices_available})")
 
             # Configure fabric BEFORE opening mesh device
-            fabric_config = self._configure_fabric(num_devices)
+            # Use requested device count, not available - fabric requires all devices be active
+            fabric_config = self._configure_fabric(num_devices_requested)
 
             device_params = self.get_pipeline_device_params()
             updated_device_params = self.get_updated_device_params(device_params)
@@ -136,23 +146,28 @@ class BaseMetalDeviceRunner(ABC):
             ) from e
 
     def _configure_fabric(self, num_devices: int):
-        """Configure fabric before opening mesh device."""
+        """Configure fabric before opening mesh device.
+        
+        For multi-device setups (N300 with 2 chips), we need FABRIC_1D
+        for CCL operations (all_gather, reduce_scatter).
+        
+        Each worker process has its own MetalContext, and TT_VISIBLE_DEVICES
+        restricts which physical devices it can see. This is the same approach
+        used by tt-vllm-plugin in tt-inference-server.
+        """
         import ttnn
         
         if num_devices == 1:
             self.logger.info(f"Device {self.device_id}: Single device, no fabric config needed")
             return None
         
-        # Detect if we're on Galaxy (multi-chip system like T3K)
-        is_galaxy = ttnn.cluster.get_cluster_type() == ttnn.cluster.ClusterType.GALAXY
-        
-        # Use FABRIC_1D_RING for Galaxy, FABRIC_1D otherwise
-        fabric_config = ttnn.FabricConfig.FABRIC_1D_RING if is_galaxy else ttnn.FabricConfig.FABRIC_1D
+        # FABRIC_1D for N300 (linear topology with 2 chips connected via Ethernet)
+        fabric_config = ttnn.FabricConfig.FABRIC_1D
         
         self.logger.info(
-            f"Device {self.device_id}: Setting fabric config to {fabric_config} "
-            f"(is_galaxy={is_galaxy}, num_devices={num_devices})"
+            f"Device {self.device_id}: Setting fabric config to {fabric_config} for {num_devices} devices"
         )
+        
         ttnn.set_fabric_config(fabric_config)
         
         return fabric_config
@@ -162,13 +177,6 @@ class BaseMetalDeviceRunner(ABC):
         try:
             mesh_device = ttnn.open_mesh_device(mesh_shape=mesh_shape, **device_params)
         except Exception as e:
-            try:
-                if fabric_config:
-                    ttnn.set_fabric_config(ttnn.FabricConfig.DISABLED)
-            except Exception as reset_error:
-                self.logger.warning(
-                    f"Device {self.device_id}: Failed to reset fabric after device initialization failure: {reset_error}"
-                )
             self.logger.error(
                 f"Device {self.device_id}: Mesh device initialization failed: {e}"
             )

@@ -2,17 +2,12 @@
 """
 Launch SGLang server with TT-Metal plugin support.
 Plugin MUST be imported before SGLang loads models.
-
-Usage:
-    sglang-tt-server --model-path meta-llama/Llama-3.1-8B-Instruct
 """
-
 import os
 import sys
 import argparse
 import logging
 logger = logging.getLogger(__name__)
-
 
 def setup_cpu_sglang_envs():
     """Setup TT-Metal environment variables."""
@@ -24,8 +19,6 @@ def setup_cpu_sglang_envs():
     os.environ["TRITON_CPU_ONLY"] = "1"
     os.environ["TRITON_INTERPRET"] = "1"
     
-
-
 def main():
     """Main entry point for TT server launch."""
     # Force fork mode FIRST - before any multiprocessing imports
@@ -33,11 +26,11 @@ def main():
     import multiprocessing
     try:
         multiprocessing.set_start_method("fork", force=True)
-        print("[TT-Plugin] Set multiprocessing start method to 'fork'", file=sys.stderr, flush=True)
+        logger.info("[TT-Plugin] Set multiprocessing start method to 'fork'")
     except RuntimeError as e:
-        print(f"[TT-Plugin] Could not set fork mode: {e}", file=sys.stderr, flush=True)
+        logger.error(f"[TT-Plugin] Could not set fork mode: {e}")
 
-    # Setup TT environment FIRST (before any imports)
+    # Setup CPU environment FIRST (before any imports)
     setup_cpu_sglang_envs()
 
     from sglang.srt.server_args import prepare_server_args
@@ -57,7 +50,7 @@ def main():
     parser.add_argument("--device", default="cpu", help="Device type (always cpu for TT)")
     parser.add_argument("--trust-remote-code", action="store_true", default=True, help="Trust remote code")
     parser.add_argument("--disable-overlap-schedule", action="store_true", default=True, help="Disable overlap schedule")
-    parser.add_argument("--dp-size", type=int, default=1, help="Data parallelism size (number of model replicas)")
+    parser.add_argument("--data-parallel-size", type=int, default=1, help="Data parallelism size (number of model replicas)")
     # TT-Metal specific settings
     parser.add_argument("--optimizations", default="performance", choices=["performance", "accuracy"],help="TT-Metal optimization mode: 'performance' (fastest) or 'accuracy' (more precise)")
     parser.add_argument("--is-galaxy", action="store_true", default=False, help="Whether the hardware is TT-Metal Galaxy (multi-chip system)")
@@ -66,14 +59,13 @@ def main():
     
     args, remaining_args = parser.parse_known_args()
     
-    # Calculate dp_size from tt-visible-devices if provided
-    dp_size = args.dp_size
+    # Calculate dp_size from tt-visible-devices if provided, Count groups: "(0,1,2,3),(4,5,6,7)" -> 2 groups
+    dp_size = args.data_parallel_size
     if args.tt_visible_devices:
-        # Count groups: "(0,1,2,3),(4,5,6,7)" -> 2 groups
         num_groups = args.tt_visible_devices.count("(")
         if num_groups > 0:
             dp_size = num_groups
-            print(f"[TT-Plugin] Auto-detected dp_size={dp_size} from {num_groups} device groups", file=sys.stderr, flush=True)
+            logger.info(f"[TT-Plugin] Auto-detected dp_size={dp_size} from {num_groups} device groups")
     
     # Build SGLang args
     sglang_args = [
@@ -100,11 +92,11 @@ def main():
     os.environ["TT_METAL_OPTIMIZATIONS"] = args.optimizations
     os.environ["TT_METAL_IS_GALAXY"] = "1" if args.is_galaxy else "0"
     if args.mesh_shape:
-        os.environ["TT_METAL_MESH_SHAPE"] = args.mesh_shape
+        os.environ["DEVICE_MESH_SHAPE"] = args.mesh_shape
     if args.tt_visible_devices:
-        os.environ["TT_VISIBLE_DEVICES_SPEC"] = args.tt_visible_devices
-    print(f"[TT-Plugin] Starting server with args: {sglang_args}", file=sys.stderr, flush=True)
-    print(f"[TT-Plugin] TT-Metal optimizations: {args.optimizations}", file=sys.stderr, flush=True)
+        os.environ["TT_VISIBLE_DEVICES"] = args.tt_visible_devices
+    logger.info(f"[TT-Plugin] Starting server with args: {sglang_args}")
+    logger.info(f"[TT-Plugin] TT-Metal optimizations: {args.optimizations}")
     
     server_args = prepare_server_args(sglang_args)
     run_server(server_args)
