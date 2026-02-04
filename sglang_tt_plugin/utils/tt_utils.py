@@ -153,7 +153,7 @@ class BaseMetalDeviceRunner(ABC):
         
         Each worker process has its own MetalContext, and TT_VISIBLE_DEVICES
         restricts which physical devices it can see. This is the same approach
-        used by tt-vllm-plugin in tt-inference-server.
+        used by tt-sglang-plugin in tt-inference-server.
         """
         import ttnn
         

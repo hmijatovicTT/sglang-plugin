@@ -128,7 +128,7 @@ class TTModels(nn.Module):
             page_size,        # block_size
             head_size,        # head_size
         )
-        # Get num_layers from config (like vLLM's model_config.get_num_layers_by_block_type())
+        # Get num_layers from config (like sglang's model_config.get_num_layers_by_block_type())
         num_layers = getattr(self.config, 'num_hidden_layers', getattr(self.config, 'n_layers', getattr(self.config, 'n_layer', 32)))  # Llama/Mistral, GPT-Neo, GPT-2
         dtype = torch.bfloat16
         # Allocate KV cache directly on TT-Metal
@@ -217,7 +217,7 @@ class TTModels(nn.Module):
         # Default token limit (generous for Blackhole, multi-device, etc.)
         max_tokens = 131072
         
-        # Override for memory-constrained cases (same as vLLM plugin)
+        # Override for memory-constrained cases (same as sglang plugin)
         if "gpt-oss" in model_path.lower():
             max_tokens = 1024  # Very limited context
         elif "DeepSeek-R1-0528" in model_path and is_wormhole:
@@ -254,7 +254,7 @@ class TTLlamaForCausalLM(TTModels):
         super().__init__(config, quant_config, tt_model, **kwargs)
 
         from models.tt_transformers.tt.generator_sglang import LlamaForCausalLM as TT_Llama
-        self.tt_model = TT_Llama.initialize_vllm_model(
+        self.tt_model = TT_Llama.initialize_sglang_model(
             config,
             self.mesh_device,
             self.max_batch_size,
@@ -262,7 +262,7 @@ class TTLlamaForCausalLM(TTModels):
             tt_data_parallel=self.tt_data_parallel,
             optimizations=self.optimizations
         )
-        logger.info(f"TT_Llama.initialize_vllm_model executed")
+        logger.info(f"TT_Llama.initialize_sglang_model executed")
         self.allocate_on_device()
 
 
@@ -272,7 +272,7 @@ class TTQwenForCausalLM(TTModels):
         super().__init__(config, quant_config, tt_model, **kwargs)
 
         from models.tt_transformers.tt.generator_sglang import QwenForCausalLM as TT_Qwen
-        self.tt_model = TT_Qwen.initialize_vllm_model(
+        self.tt_model = TT_Qwen.initialize_sglang_model(
             config,
             self.mesh_device,
             self.max_batch_size,
@@ -280,7 +280,7 @@ class TTQwenForCausalLM(TTModels):
             tt_data_parallel=self.tt_data_parallel,
             optimizations=self.optimizations
         )
-        logger.info(f"TT_Qwen.initialize_vllm_model executed")
+        logger.info(f"TT_Qwen.initialize_sglang_model executed")
         self.allocate_on_device()
 
 
@@ -290,7 +290,7 @@ class TTMistralForCausalLM(TTModels):
         super().__init__(config, quant_config, tt_model, **kwargs)
 
         from models.tt_transformers.tt.generator_sglang import MistralForCausalLM as TT_Mistral
-        self.tt_model = TT_Mistral.initialize_vllm_model(
+        self.tt_model = TT_Mistral.initialize_sglang_model(
             config,
             self.mesh_device,
             self.max_batch_size,
@@ -298,7 +298,7 @@ class TTMistralForCausalLM(TTModels):
             tt_data_parallel=self.tt_data_parallel,
             optimizations=self.optimizations
         )
-        logger.info(f"TT_Mistral.initialize_vllm_model executed")
+        logger.info(f"TT_Mistral.initialize_sglang_model executed")
         self.allocate_on_device()
 
 
@@ -308,7 +308,7 @@ class TTGptOssForCausalLM(TTModels):
         super().__init__(config, quant_config, tt_model, **kwargs)
 
         from models.tt_transformers.tt.generator_sglang import GptOssForCausalLM as TT_GptOss
-        self.tt_model = TT_GptOss.initialize_vllm_model(
+        self.tt_model = TT_GptOss.initialize_sglang_model(
             config,
             self.mesh_device,
             self.max_batch_size,
@@ -316,7 +316,7 @@ class TTGptOssForCausalLM(TTModels):
             tt_data_parallel=self.tt_data_parallel,
             optimizations=self.optimizations
         )
-        logger.info(f"TT_GptOss.initialize_vllm_model executed")
+        logger.info(f"TT_GptOss.initialize_sglang_model executed")
         self.allocate_on_device()
 
 

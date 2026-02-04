@@ -9,6 +9,8 @@ import argparse
 import logging
 logger = logging.getLogger(__name__)
 
+import sglang_tt_plugin
+
 def setup_cpu_sglang_envs():
     """Setup TT-Metal environment variables."""
     os.environ["VLLM_DEVICE_TYPE"] = "cpu"
@@ -45,7 +47,7 @@ def main():
     parser.add_argument("--page-size", type=int, default=64, help="Block size for KV cache")
     parser.add_argument("--max-running-requests", type=int, default=32, help="Max batch size")
     parser.add_argument("--context-length", type=int, default=32768 , help="Max sequence length")
-     # Other settings
+    # Other settings
     parser.add_argument("--log-level", default="info", help="Log level")
     parser.add_argument("--device", default="cpu", help="Device type (always cpu for TT)")
     parser.add_argument("--trust-remote-code", action="store_true", default=True, help="Trust remote code")
